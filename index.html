@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cash Flow & Recovery Analysis — Campus Space Consolidation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #fff; }
+  input[type="range"] { height: 6px; cursor: pointer; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: #B42025; cursor: pointer; }
+  input[type="range"]::-moz-range-thumb { height: 16px; width: 16px; border-radius: 50%; background: #B42025; cursor: pointer; border: none; }
+  @media print { .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+// Lease cost engine
+const sf52 = 2406, net52 = 25.0, sf8 = 6500, sf8half = 3250;
+const tmi52 = (yr) => 25.86 * Math.pow(1.03, yr - 2025);
+const tmi8 = (yr) => 17.28 * Math.pow(1.03, yr - 2025);
+const net8 = (yr) => ((yr - 2025 + 1) <= 5 ? 22.75 : 24.75);
+const mo52 = (yr) => (net52 + tmi52(yr)) * sf52 / 12;
+const mo8full = (yr) => (net8(yr) + tmi8(yr)) * sf8 / 12;
+const mo8half = (yr) => (net8(yr) + tmi8(yr)) * sf8half / 12;
+
+const END_52_MO = 41;
+const END_8_MO = 104;
+const EXPIRY_52 = END_52_MO + 1;
+const EXPIRY_8 = END_8_MO + 1;
+
+const dateFromOffset = (mo) => new Date(2026, 3 + mo, 1);
+const monthLabel = (mo) => {
+  const d = new Date(2026, 3 + mo, 1);
+  return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+};
+const fmtFull = (n) => n < 0 ? `-$${Math.abs(n).toLocaleString()}` : `$${n.toLocaleString()}`;
+
+function computeModel(off52mo, off8_2mo, off8_3mo) {
+  const firstOff = Math.min(off8_2mo, off8_3mo);
+  const secondOff = Math.max(off8_2mo, off8_3mo);
+  const yearBuckets = {};
+  let fullObligation = 0, rentDuring = 0;
+
+  for (let m = 0; m <= END_8_MO; m++) {
+    const yr = dateFromOffset(m).getFullYear();
+    if (!yearBuckets[yr]) yearBuckets[yr] = { noAction: 0, withAction: 0 };
+
+    let noAction = 0;
+    if (m <= END_52_MO) noAction += mo52(yr);
+    noAction += mo8full(yr);
+    fullObligation += noAction;
+    yearBuckets[yr].noAction += noAction;
+
+    let action = 0;
+    const eff52 = off52mo > END_52_MO ? END_52_MO + 1 : off52mo;
+    if (m < eff52 && m <= END_52_MO) action += mo52(yr);
+
+    const effFirst = firstOff > END_8_MO ? END_8_MO + 1 : firstOff;
+    const effSecond = secondOff > END_8_MO ? END_8_MO + 1 : secondOff;
+    if (m < effFirst) {
+      action += mo8full(yr);
+    } else if (m < effSecond) {
+      action += mo8half(yr);
+    }
+
+    rentDuring += action;
+    yearBuckets[yr].withAction += action;
+  }
+
+  const totalSavings = fullObligation - rentDuring;
+  const years = Object.keys(yearBuckets).sort().map(yr => {
+    const b = yearBuckets[yr];
+    return { year: yr === "2026" ? "2026*" : yr, noAction: Math.round(b.noAction), withAction: Math.round(b.withAction), savings: Math.round(b.noAction - b.withAction) };
+  });
+  let cum = 0;
+  years.forEach(y => { cum += y.savings; y.cumSavings = cum; });
+  const activeYears = years.filter(y => y.noAction > 0 || y.withAction > 0);
+  return { fullObligation: Math.round(fullObligation), rentDuring: Math.round(rentDuring), totalSavings: Math.round(totalSavings), years: activeYears };
+}
+
+const ganttLabelsTop = ["Apr'26","Jan'27","Jan'28","Jan'29","Jan'30","Jan'31","Jan'32","Jan'33","Jan'34","Dec'34"];
+
+function App() {
+  const [off52, setOff52] = useState(14);
+  const [off8_3, setOff8_3] = useState(16);
+  const [off8_2, setOff8_2] = useState(26);
+  const [capex, setCapex] = useState(800000);
+
+  const model = useMemo(() => computeModel(off52, off8_2, off8_3), [off52, off8_2, off8_3]);
+
+  const totalCost = model.rentDuring + capex;
+  const netSavings = model.fullObligation - totalCost;
+  const recoveryPct = model.fullObligation > 0 ? Math.max(-20, (netSavings / model.fullObligation) * 100) : 0;
+  const breakevenCapex = Math.max(0, model.totalSavings);
+
+  const is52AtExpiry = off52 >= EXPIRY_52;
+  const is8_3AtExpiry = off8_3 >= EXPIRY_8;
+  const is8_2AtExpiry = off8_2 >= EXPIRY_8;
+  const allAtExpiry = is52AtExpiry && is8_3AtExpiry && is8_2AtExpiry;
+
+  const maxGantt = 105;
+  const adminEnd = 5;
+  const ganttBars = [];
+  ganttBars.push({ label: "Admin / Approvals / Board", start: 0, len: adminEnd, color: "#888", group: "prep" });
+  if (!is52AtExpiry) {
+    ganttBars.push({ label: "Phase 1 work → 52Q", start: adminEnd, len: Math.max(1, off52 - adminEnd), color: "#D4A843", group: "p1" });
+    ganttBars.push({ label: "52Q off books", start: off52, group: "milestone", mlabel: `52Q Off (${monthLabel(off52)})` });
+  }
+  if (!is8_2AtExpiry) {
+    const dStart = is8_3AtExpiry ? adminEnd : Math.min(off8_3, adminEnd + 6);
+    ganttBars.push({ label: "2nd flr sublease + move", start: dStart, len: Math.max(1, off8_2 - dStart), color: "#B42025", group: "p2" });
+    ganttBars.push({ label: "8Q 2nd floor off", start: off8_2, group: "milestone", mlabel: `2nd Off (${monthLabel(off8_2)})` });
+  }
+  if (!is8_3AtExpiry) {
+    ganttBars.push({ label: "Phase 2 → 8Q 3rd flr", start: adminEnd, len: Math.max(1, off8_3 - adminEnd), color: "#B42025", group: "p2" });
+    ganttBars.push({ label: "8Q 3rd floor off", start: off8_3, group: "milestone", mlabel: `3rd Off (${monthLabel(off8_3)})` });
+  }
+
+  const sliderMin = 6;
+  const sliders = [
+    { label: "52Q off books", value: off52, set: setOff52, min: sliderMin, max: EXPIRY_52, expiryVal: EXPIRY_52, expiryLabel: "Aug 2029", color: "#D4A843" },
+    { label: "8Q 2nd floor off", value: off8_2, set: setOff8_2, min: sliderMin, max: EXPIRY_8, expiryVal: EXPIRY_8, expiryLabel: "Dec 2034", color: "#B42025" },
+    { label: "8Q 3rd floor off", value: off8_3, set: setOff8_3, min: sliderMin, max: EXPIRY_8, expiryVal: EXPIRY_8, expiryLabel: "Dec 2034", color: "#B42025" },
+  ];
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', Calibri, sans-serif", background: "#fff", color: "#222", maxWidth: 980, margin: "0 auto", padding: "28px 24px" }}>
+
+      <div style={{ borderBottom: "3px solid #B42025", paddingBottom: 14, marginBottom: 28 }}>
+        <h1 style={{ fontSize: 24, fontWeight: 400, margin: 0, color: "#111" }}>Cash Flow & Recovery Analysis</h1>
+        <p style={{ fontSize: 12, color: "#888", margin: "4px 0 0" }}>Campus Space Consolidation — Interactive Timeline, Capex & Recovery Model</p>
+      </div>
+
+      <div style={{ background: "#F9F9F9", border: "1px solid #e5e5e5", padding: "10px 14px", marginBottom: 20, fontSize: 11.5, color: "#555", lineHeight: 1.5 }}>
+        <strong style={{ color: "#B42025" }}>Note:</strong> We've assumed sunk costs until <strong>Oct 2026</strong> to give space for approvals, initial planning, and the first move that could happen (COE to 56Q).
+        Sliders default to our conservative planning assumptions. Drag right toward lease expiry to see impact of delays.
+      </div>
+
+      {/* SECTION 1 */}
+      <div style={{ marginBottom: 28 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "#B42025", margin: "0 0 12px" }}>1. Move Timeline</h2>
+        <div className="no-print" style={{ background: "#f9f9f9", border: "1px solid #e5e5e5", padding: "14px 18px", marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 12 }}>
+            Adjust when each space comes off the books. Drag right toward lease expiry to model delays. All figures recalculate.
+          </div>
+          {sliders.map((s, i) => {
+            const atExpiry = s.value >= s.expiryVal;
+            return (
+              <div key={i} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 130, fontSize: 11.5, fontWeight: 600, color: "#444", textAlign: "right" }}>{s.label}:</div>
+                  <div style={{ flex: 1 }}>
+                    <input type="range" min={s.min} max={s.max} value={s.value} onChange={e => s.set(Number(e.target.value))} style={{ width: "100%" }} />
+                  </div>
+                  <div style={{ width: 140, fontSize: 12, fontWeight: 700, color: atExpiry ? "#999" : s.color, textAlign: "right" }}>
+                    {atExpiry ? `Lease expiry (${s.expiryLabel})` : monthLabel(s.value)}
+                  </div>
+                </div>
+                <div style={{ display: "flex", marginLeft: 142, fontSize: 8, color: "#ccc" }}>
+                  <span>Oct '26</span><span style={{ flex: 1 }}></span><span style={{ marginRight: 140 }}>{s.expiryLabel}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {!allAtExpiry && (
+          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <div style={{ minWidth: 700 }}>
+              <div style={{ display: "flex", marginLeft: 195, marginBottom: 3 }}>
+                {ganttLabelsTop.map((l, i) => <div key={i} style={{ flex: 1, fontSize: 9, color: "#aaa", textAlign: i === 0 ? "left" : "center" }}>{l}</div>)}
+              </div>
+              <div style={{ marginLeft: 195, height: 1, background: "#e0e0e0", marginBottom: 6 }} />
+              {ganttBars.map((bar, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", marginBottom: bar.group === "milestone" ? 2 : 5, height: bar.group === "milestone" ? 20 : 24 }}>
+                  <div style={{ width: 195, fontSize: 10.5, color: "#555", textAlign: "right", paddingRight: 10, whiteSpace: "nowrap" }}>{bar.label}</div>
+                  <div style={{ flex: 1, position: "relative", height: "100%" }}>
+                    {bar.group === "milestone" ? (
+                      <>
+                        <div style={{ position: "absolute", left: `${(Math.min(bar.start, maxGantt) / maxGantt) * 100}%`, top: 2, width: 0, height: 16, borderLeft: "2px dashed #2E7D32" }} />
+                        <div style={{ position: "absolute", left: `${(Math.min(bar.start, maxGantt) / maxGantt) * 100}%`, top: 2, fontSize: 9, color: "#2E7D32", fontWeight: 700, marginLeft: 6, whiteSpace: "nowrap" }}>{bar.mlabel}</div>
+                      </>
+                    ) : (
+                      <div style={{ position: "absolute", left: `${(bar.start / maxGantt) * 100}%`, width: `${(Math.min(bar.len, maxGantt - bar.start) / maxGantt) * 100}%`, height: 18, top: 3, background: bar.color, opacity: 0.8, borderRadius: 3 }} />
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          {[
+            { label: "Total Lease Obligation\n(No Action)", value: fmtFull(model.fullObligation), color: "#B42025" },
+            { label: "Rent Paid During\nTransition", value: fmtFull(model.rentDuring), sub: allAtExpiry ? "Same as no action" : null, color: allAtExpiry ? "#999" : "#D4A843" },
+            { label: "Lease Savings\nCaptured", value: fmtFull(model.totalSavings), sub: model.totalSavings === 0 ? "No spaces freed up" : null, color: model.totalSavings === 0 ? "#999" : "#2E7D32" },
+          ].map((c, i) => (
+            <div key={i} style={{ background: "#f9f9f9", border: "1px solid #e5e5e5", padding: "12px", textAlign: "center" }}>
+              <div style={{ fontSize: 9.5, color: "#888", marginBottom: 4, whiteSpace: "pre-line", lineHeight: 1.3 }}>{c.label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: c.color }}>{c.value}</div>
+              {c.sub && <div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>{c.sub}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* SECTION 2 */}
+      <div style={{ marginBottom: 28 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "#B42025", margin: "0 0 4px" }}>2. Year-by-Year Lease Obligation (Rent Only)</h2>
+        <p style={{ fontSize: 11, color: "#888", margin: "0 0 10px" }}>
+          Excludes capex. {allAtExpiry ? "No spaces freed — both scenarios identical." :
+            `52Q off ${is52AtExpiry ? "at expiry" : monthLabel(off52)} | 8Q 2nd flr ${is8_2AtExpiry ? "at expiry" : monthLabel(off8_2)} | 8Q 3rd flr ${is8_3AtExpiry ? "at expiry" : monthLabel(off8_3)}`}
+        </p>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ background: "#F2DEDE" }}>
+              {["Year", "No Action (Rent)", "With Action (Rent)", "Annual Savings", "Cumul. Savings"].map(h => (
+                <th key={h} style={{ padding: "7px 8px", textAlign: "center", fontWeight: 600, color: "#333", borderBottom: "1px solid #ccc", fontSize: 11 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {model.years.map((row, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid #eee" }}>
+                <td style={{ padding: "6px 8px", textAlign: "center", fontWeight: 600 }}>{row.year}</td>
+                <td style={{ padding: "6px 8px", textAlign: "center", color: "#666" }}>{fmtFull(row.noAction)}</td>
+                <td style={{ padding: "6px 8px", textAlign: "center", color: row.withAction === 0 ? "#2E7D32" : "#666", fontWeight: row.withAction === 0 ? 600 : 400 }}>
+                  {row.withAction === 0 ? "$0" : fmtFull(row.withAction)}
+                </td>
+                <td style={{ padding: "6px 8px", textAlign: "center", color: row.savings > 0 ? "#2E7D32" : "#bbb" }}>{row.savings > 0 ? fmtFull(row.savings) : "—"}</td>
+                <td style={{ padding: "6px 8px", textAlign: "center", fontWeight: 600, color: i === model.years.length - 1 && row.cumSavings > 0 ? "#B42025" : "#333" }}>
+                  {row.cumSavings > 0 ? fmtFull(row.cumSavings) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ background: "#f5f5f5", borderTop: "2px solid #bbb" }}>
+              <td style={{ padding: "7px 8px", textAlign: "center", fontWeight: 700 }}>Total</td>
+              <td style={{ padding: "7px 8px", textAlign: "center", fontWeight: 700 }}>{fmtFull(model.fullObligation)}</td>
+              <td style={{ padding: "7px 8px", textAlign: "center", fontWeight: 700 }}>{fmtFull(model.rentDuring)}</td>
+              <td style={{ padding: "7px 8px" }}></td>
+              <td style={{ padding: "7px 8px", textAlign: "center", fontWeight: 700, color: "#B42025" }}>{fmtFull(model.totalSavings)}</td>
+            </tr>
+          </tfoot>
+        </table>
+        <p style={{ fontSize: 10, color: "#aaa", marginTop: 4 }}>*2026 reflects Apr–Dec (9 months). All spaces occupied through Sep 2026 regardless (sunk cost).</p>
+      </div>
+
+      {/* SECTION 3 */}
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "#B42025", margin: "0 0 4px" }}>3. Recovery Rate by Capex Spend</h2>
+
+        <div style={{ background: model.totalSavings > 0 ? "#F0F8FF" : "#F5F5F5", border: `1px solid ${model.totalSavings > 0 ? "#D0E0F0" : "#e0e0e0"}`, padding: "10px 14px", marginBottom: 14, fontSize: 11.5, color: "#333", lineHeight: 1.6 }}>
+          <strong>Scenario assumptions:</strong>
+          {allAtExpiry ? (
+            <span> All spaces run to lease expiry. No savings captured. Capex analysis not applicable.</span>
+          ) : (
+            <>
+              <br />
+              {!is52AtExpiry && <>52Q off books by <strong>{monthLabel(off52)}</strong> · </>}
+              {!is8_3AtExpiry && <>8Q 3rd floor off by <strong>{monthLabel(off8_3)}</strong> · </>}
+              {!is8_2AtExpiry && <>8Q 2nd floor off by <strong>{monthLabel(off8_2)}</strong></>}
+              <br />
+              Rent paid during transition: <strong>{fmtFull(model.rentDuring)}</strong> | 
+              Savings pool: <strong style={{ color: "#2E7D32" }}>{fmtFull(model.totalSavings)}</strong> | 
+              Breakeven capex: <strong style={{ color: "#B42025" }}>{fmtFull(breakevenCapex)}</strong>
+            </>
+          )}
+        </div>
+
+        {model.totalSavings > 0 ? (
+          <div style={{ background: "#f9f9f9", border: "1px solid #e5e5e5", padding: "16px 20px" }}>
+            <div className="no-print" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: "#333", whiteSpace: "nowrap" }}>Capex Spend:</label>
+              <input type="range" min={0} max={Math.min(breakevenCapex + 200000, 3000000)} step={25000} value={capex}
+                onChange={(e) => setCapex(Number(e.target.value))} style={{ flex: 1 }} />
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#B42025", minWidth: 100, textAlign: "right" }}>{fmtFull(capex)}</div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+              {[
+                { label: "Capex", value: fmtFull(capex), color: "#444" },
+                { label: "Rent (Transition)", value: fmtFull(model.rentDuring), color: "#D4A843" },
+                { label: "Total Cost of Action", value: fmtFull(totalCost), color: "#333" },
+                { label: netSavings >= 0 ? "Net Savings" : "Net Loss", value: fmtFull(netSavings), color: netSavings >= 0 ? "#2E7D32" : "#B42025" },
+              ].map((c, i) => (
+                <div key={i} style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 9.5, color: "#888", marginBottom: 3 }}>{c.label}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: c.color }}>{c.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#888", marginBottom: 3 }}>
+                <span>0%</span>
+                <span>Recovery: <strong style={{ color: recoveryPct >= 50 ? "#2E7D32" : recoveryPct >= 20 ? "#D4A843" : "#B42025", fontSize: 14 }}>{Math.max(0, recoveryPct).toFixed(1)}%</strong> of {fmtFull(model.fullObligation)}</span>
+                <span>100%</span>
+              </div>
+              <div style={{ height: 22, background: "#eee", borderRadius: 3, position: "relative", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", width: `${Math.min(100, Math.max(0, recoveryPct))}%`, borderRadius: 3,
+                  background: recoveryPct >= 50 ? "#2E7D32" : recoveryPct >= 20 ? "#D4A843" : "#B42025",
+                  transition: "width 0.15s, background 0.15s",
+                }} />
+                <div style={{ position: "absolute", left: "50%", top: 0, height: "100%", borderLeft: "2px dashed #333", opacity: 0.3 }} />
+                <div style={{ position: "absolute", left: "60%", top: 0, height: "100%", borderLeft: "2px dashed #333", opacity: 0.3 }} />
+              </div>
+              <div style={{ display: "flex", fontSize: 9, color: "#aaa", marginTop: 2 }}>
+                <span style={{ position: "relative", left: "48%" }}>50%</span>
+                <span style={{ position: "relative", left: "56%" }}>60%</span>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              {[
+                { label: "No Action", segments: [{ w: model.fullObligation, color: "#B42025" }], total: model.fullObligation },
+                { label: "With Action", segments: [{ w: model.rentDuring, color: "#D4A843" }, ...(capex > 0 ? [{ w: capex, color: "#555" }] : [])], total: totalCost },
+              ].map((b, i) => {
+                const maxVal = Math.max(model.fullObligation, totalCost);
+                return (
+                  <div key={i} style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ width: 90, fontSize: 11, color: "#555", textAlign: "right", paddingRight: 10 }}>{b.label}</div>
+                    <div style={{ flex: 1, position: "relative", height: 22, background: "#f0f0f0", borderRadius: 2 }}>
+                      {b.segments.reduce((acc, seg, j) => {
+                        const left = acc.offset;
+                        const width = (seg.w / maxVal) * 100;
+                        acc.elements.push(
+                          <div key={j} style={{ position: "absolute", left: `${left}%`, width: `${Math.min(width, 100 - left)}%`, height: "100%", background: seg.color, borderRadius: j === 0 && b.segments.length === 1 ? 2 : j === 0 ? "2px 0 0 2px" : "0 2px 2px 0" }} />
+                        );
+                        acc.offset += width;
+                        return acc;
+                      }, { offset: 0, elements: [] }).elements}
+                      <div style={{ position: "absolute", right: 8, top: 3, fontSize: 10.5, fontWeight: 600, color: "#333" }}>{fmtFull(b.total)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ marginLeft: 90, paddingLeft: 10, display: "flex", gap: 16, marginTop: 2 }}>
+                {[["#B42025","Lease (no action)"],["#D4A843","Rent during transition"],["#555","Capex"]].map(([c,l],i) => (
+                  <div key={i} style={{ fontSize: 9, color: "#888" }}><span style={{ display: "inline-block", width: 10, height: 10, background: c, marginRight: 4, verticalAlign: "middle" }} />{l}</div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12, fontSize: 11, color: "#666", borderTop: "1px solid #e5e5e5", paddingTop: 10 }}>
+              <strong>For 50% recovery:</strong> capex must stay ≤ ~{fmtFull(Math.round(model.fullObligation * 0.5 - model.rentDuring))} | 
+              <strong> For 60% recovery:</strong> capex must stay ≤ ~{fmtFull(Math.round(model.fullObligation * 0.4 - model.rentDuring))}
+            </div>
+          </div>
+        ) : (
+          <div style={{ background: "#F5F5F5", border: "1px solid #e0e0e0", padding: "20px", textAlign: "center", color: "#888", fontSize: 13 }}>
+            No savings to analyze — all spaces set to run to lease expiry.<br />
+            Drag the timeline sliders above to model earlier exit dates.
+          </div>
+        )}
+      </div>
+
+      {/* Credit */}
+      <div style={{ textAlign: "center", marginTop: 32, paddingTop: 12, borderTop: "1px solid #eee" }}>
+        <p style={{ fontSize: 10, color: "#bbb", letterSpacing: 0.3, fontStyle: "italic" }}>
+          Created by Jamal Muckett-Sobers — Manager, Brampton Projects & Facilities
+        </p>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(<App />, document.getElementById("root"));
+</script>
+</body>
+</html>
